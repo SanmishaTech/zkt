@@ -218,6 +218,7 @@ app.get("/iclock/getrequest", (req, res) => {
         Date: convertToGMT(new Date()),
         Server: "nginx/1.6.0",
       });
+      // console.log("This is command", row.command);
 
       return res.status(200).send(row.command);
     }
@@ -237,9 +238,22 @@ app.post("/iclock/cdata", (req, res) => {
 // Endpoint to handle device command results
 app.post("/iclock/devicecmd", (req, res) => {
   logger("devicecmd endpoint hit");
-  const cmdStatus = req.headers["cmd-status"];
-  console.log("Request body:", req.headers, cmdStatus);
+  res.set({
+    Date: convertToGMT(new Date()),
+    "Content-Length": 2,
+  });
+  // console.log("Request body:", req);
 
+  let body = [];
+  req.on("data", (chunk) => {
+    body.push(chunk);
+  });
+  req.on("end", () => {
+    body = Buffer.concat(body).toString(); // Convert to string if text-based
+    console.log(body); // Log raw body
+  });
+
+  // console.log("This is streamed output", body);
   // console.log("Command execution status:", cmdStatus);
   console.log("Request body:", req.body);
 
@@ -258,16 +272,20 @@ app.post("/api/register-user", upload.single("photo"), async (req, res) => {
     // Convert photo to Base64
     const photoBuffer = fs.readFileSync(req.file.path);
     const photoBase64 = photoBuffer.toString("base64");
-    console.log(photo);
+    // console.log(photoBase64);
+    console.log(name);
+    console.log(userPin);
 
-    // Create commands
+    //Create commands
     const commands = [
-      `C:${new Date()}:DATA USER PIN=${userPin}\tName=${name}`,
+      `C:223:DATA USER PIN=${userPin}\tName=${name}`,
       `C:${new Date()}:DATA UPDATE BIODATA PIN=${userPin}\tFID=1\tNo=0\tIndex=0\tType=9\tmajorVer=5\tminorVer=622\tFormat=0\tSize=${
         photoBuffer.length
-      }\tValid=1\tTMP=${photo}`,
+      }\tValid=1\tTMP=${photoBase64}`,
     ];
-
+    // const commands = [
+    //   `C:${new Date()}:DATA UPDATE USERINFO PIN=${userPin}\tName=${name}\tPri=0`,
+    // ];
     // Store commands in database
     const stmt = db.prepare("INSERT INTO commands (command) VALUES (?)");
     for (const cmd of commands) {
