@@ -5,6 +5,8 @@ const sqlite3 = require("sqlite3").verbose();
 const multer = require("multer");
 const fs = require("fs");
 const { randomUUID } = require("crypto");
+const sharp = require("sharp");
+const Database = require("./Keyvaluedb");
 
 // Initialize Express app
 const app = express();
@@ -37,6 +39,10 @@ const db = new sqlite3.Database(dbPath, (err) => {
     console.log("Connected to SQLite database.");
   }
 });
+const keydb = new Database({
+  root: "./",
+  maxDirs: 1e4,
+});
 
 db.run(
   `CREATE TABLE IF NOT EXISTS users (
@@ -55,6 +61,20 @@ db.run(
 // Create commands table
 db.run(
   `CREATE TABLE IF NOT EXISTS commands (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  command TEXT NOT NULL,
+  executed BOOLEAN DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);`,
+  (err) => {
+    if (err) {
+      console.error("Error creating commands table:", err.message);
+    }
+  }
+);
+
+db.run(
+  `CREATE TABLE IF NOT EXISTS Devices (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   command TEXT NOT NULL,
   executed BOOLEAN DEFAULT 0,
@@ -114,7 +134,10 @@ app.post("/users", upload.single("photo"), (req, res) => {
 });
 
 // Route to fetch all users
-app.get("/users", (req, res) => {
+app.get("/users", async (req, res) => {
+  deviceCommandQueue["123"] = "123";
+  console.log(deviceCommandQueue);
+
   const query = `SELECT * FROM users`;
   db.all(query, [], (err, rows) => {
     if (err) {
@@ -132,8 +155,8 @@ app.get("/iclock/cdata", (req, res) => {
     logger("cdata endpoint hit");
 
     // Extract and validate the SN parameter
-    console.log(req.query);
-    console.log(req.headers);
+    // console.log(req.query);
+    // console.log(req.headers);
     const { SN } = req.query;
     if (!SN || typeof SN !== "string") {
       logger("SN query parameter missing or invalid");
@@ -143,7 +166,7 @@ app.get("/iclock/cdata", (req, res) => {
     }
 
     // Create the response body (use \n for line breaks)
-    const body = `GET OPTION FROM:${SN}\nATTLOGStamp=None\nOPERLOGStamp=9999\nATTPHOTOStamp=None\nErrorDelay=30\nDelay=10\nTransTimes=00:00;14:05\nTransInterval=1\nTransFlag=TransData AttLog OpLog AttPhoto EnrollUser ChgUser EnrollFP\nChgFP UserPic\nTimeZone=8\nRealtime=0\nEncrypt=0`;
+    const body = `GET OPTION FROM:${SN}\nATTLOGStamp=None\nOPERLOGStamp=9999\nATTPHOTOStamp=None\nErrorDelay=30\nDelay=10\nTransTimes=00:00;14:05\nTransInterval=1\nTransFlag=TransData AttLog OpLog AttPhoto EnrollUser ChgUser EnrollFP\nChgFP UserPic\nTimeZone=8\nRealtime=1\nEncrypt=0`;
 
     const contentLength = Buffer.byteLength(body, "utf-8");
 
@@ -168,6 +191,41 @@ app.get("/iclock/cdata", (req, res) => {
     logger("Error occurred:", error);
     return res.status(500).send("Internal Server Error");
   }
+});
+
+function storeCommands(commands, callback) {
+  const stmt = db.prepare("INSERT INTO commands (command) VALUES (?)");
+  const ids = [];
+
+  for (const cmd of commands) {
+    stmt.run([cmd], function (err) {
+      if (err) {
+        console.error("Error inserting command:", err);
+        callback(err, null);
+        return;
+      }
+      ids.push(this.lastID); // Collect the ID of the inserted command
+
+      // Check if all commands have been processed
+      if (ids.length === commands.length) {
+        callback(null, ids);
+      }
+    });
+  }
+  stmt.finalize();
+}
+app.get("/command/:id", (req, res) => {
+  const { id } = req.params;
+  db.get("SELECT * FROM commands WHERE id = ?", [id], (err, row) => {
+    if (err) {
+      console.error("Error fetching command:", err);
+      res.status(500).send("Internal Server Error");
+    } else if (!row) {
+      res.status(404).send("Command not found");
+    } else {
+      res.json(row);
+    }
+  });
 });
 
 app.get("/users", (req, res) => {
@@ -228,84 +286,143 @@ app.get("/iclock/getrequest", (req, res) => {
 // POST endpoint for iclock/cdata
 app.post("/iclock/cdata", (req, res) => {
   logger("POST cdata endpoint hit");
-  console.log("Request body:", req.query);
-  console.log("request Headers for post iclock", req.headers);
+  // console.log("Request body:", req.query);
+  // console.log("request Headers for post iclock", req.headers);
 
   // Always respond with OK
   res.status(200).send("OK");
 });
 
 // Endpoint to handle device command results
-app.post("/iclock/devicecmd", (req, res) => {
+app.post("/iclock/devicecmd", async (req, res) => {
   logger("devicecmd endpoint hit");
   res.set({
     Date: convertToGMT(new Date()),
     "Content-Length": 2,
   });
-  // console.log("Request body:", req);
 
-  let body = [];
-  req.on("data", (chunk) => {
-    body.push(chunk);
-  });
-  req.on("end", () => {
-    body = Buffer.concat(body).toString(); // Convert to string if text-based
-    console.log(body); // Log raw body
-  });
+  try {
+    console.log("Entered the try block");
 
-  // console.log("This is streamed output", body);
-  // console.log("Command execution status:", cmdStatus);
-  console.log("Request body:", req.body);
+    // Wrap the data and end events in a Promise to properly await them
+    const body = await new Promise((resolve, reject) => {
+      let body = [];
 
-  res.status(200).send("OK");
+      req.on("data", (chunk) => {
+        body.push(chunk);
+      });
+
+      req.on("end", () => {
+        try {
+          body = Buffer.concat(body).toString(); // Convert to string if text-based
+          console.log(body); // Log raw body
+          resolve(body); // Resolve the Promise when done
+        } catch (error) {
+          reject(error); // Reject if there's an error processing the body
+        }
+      });
+
+      req.on("error", (err) => {
+        reject(err); // Reject if there's an error with the request
+      });
+    });
+
+    // Optional: Perform operations with body here if needed.
+    console.log("Processed body:", body);
+
+    // Send response after processing
+    res.status(200).send("OK");
+  } catch (error) {
+    console.error("Error in request handling:", error);
+    res.status(500).send("Error processing request");
+  }
+});
+
+app.post("/api/delete-user/:id", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const commands = [`c:122:DATA DELETE USER PIN=${id}`];
+
+    storeCommands(commands, (err, ids) => {
+      if (err) {
+        return res
+          .status(500)
+          .json({ message: "Error inserting commands", error: err });
+      }
+
+      res.status(200).json({
+        message: "User Deleted Successfully",
+        commands: commands.length,
+        databaseId: ids, // Return all inserted IDs
+        UserId: id,
+      });
+    });
+    // const query = `DELETE FROM users WHERE id = ?`;
+    // db.run(query, [id], (err) => {
+    //   if (err) {
+    //     console.error("Error deleting user:", err);
+    //     return res.status(500).json({ error: "Failed to delete user" });
+    //   }
+
+    //   res.status(200).json({ message: "User deleted successfully" });
+    // });
+  } catch (error) {
+    console.error("Error deleting user:", error);
+    res.status(500).json({ error: "Failed to delete user" });
+  }
 });
 
 // API to queue new user registration with face
 app.post("/api/register-user", upload.single("photo"), async (req, res) => {
-  const { name, userPin, photo } = req.body;
+  const { name, userPin } = req.body;
 
   if (!req.file || !name || !userPin) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
   try {
-    // Convert photo to Base64
-    const photoBuffer = fs.readFileSync(req.file.path);
+    // Process and optimize the photo using sharp with JPG format
+    const optimizedPhotoPath = path.join(
+      uploadDir,
+      `optimized-${req.file.filename}`
+    );
+    await sharp(req.file.path)
+      .resize(300, 300)
+      .toFormat("jpg") // Explicitly set output format to JPEG
+      .jpeg({
+        quality: 70,
+        chromaSubsampling: "4:4:4", // Maintain color quality
+      })
+      .toFile(optimizedPhotoPath);
+
+    // Convert optimized photo to Base64
+    const photoBuffer = fs.readFileSync(optimizedPhotoPath);
     const photoBase64 = photoBuffer.toString("base64");
-    // console.log(photoBase64);
-    console.log(name);
-    console.log(userPin);
 
-    //Create commands
-    const commands = [
-      `C:223:DATA USER PIN=${userPin}\tName=${name}`,
-      `C:${new Date()}:DATA UPDATE BIODATA PIN=${userPin}\tFID=1\tNo=0\tIndex=0\tType=9\tmajorVer=5\tminorVer=622\tFormat=0\tSize=${
-        photoBuffer.length
-      }\tValid=1\tTMP=${photoBase64}`,
-    ];
-    // const commands = [
-    //   `C:${new Date()}:DATA UPDATE USERINFO PIN=${userPin}\tName=${name}\tPri=0`,
-    // ];
-    // Store commands in database
-    const stmt = db.prepare("INSERT INTO commands (command) VALUES (?)");
-    for (const cmd of commands) {
-      stmt.run([cmd], (err) => {
-        // Wrap cmd in an array
-        if (err) {
-          console.error("Error inserting command:", err);
-        } else {
-          console.log("Command inserted:", "insearted");
-        }
-      });
-    }
-    stmt.finalize();
+    // Clean up both original and optimized uploaded files
 
-    // Clean up uploaded file
     fs.unlinkSync(req.file.path);
+    fs.unlinkSync(optimizedPhotoPath);
 
-    res.status(200).json({
-      message: "User registration queued successfully",
-      commands: commands.length,
+    const commands = [
+      `C:223123:DATA USER PIN=1\tName=${name}`,
+      `C:333123:DATA UPDATE BIOPHOTO PIN=1\tFID=1\tNo=0\tIndex=0\tType=2\tFormat=0\tSize=${photoBuffer.length}\tContent=${photoBase64}`,
+      // `C:213:CLEAR DATA `,
+    ];
+
+    storeCommands(commands, (err, ids) => {
+      if (err) {
+        return res
+          .status(500)
+          .json({ message: "Error inserting commands", error: err });
+      }
+
+      res.status(200).json({
+        message: "Commands queued successfully",
+        commands: commands.length,
+        ids: ids, // Return all inserted IDs
+      });
     });
   } catch (error) {
     console.error("Error processing registration:", error);
