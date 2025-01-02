@@ -6,10 +6,20 @@ const multer = require("multer");
 const fs = require("fs");
 const { randomUUID } = require("crypto");
 const sharp = require("sharp");
+const cors = require("cors");
 
 // Initialize Express app
 const app = express();
 let logger = console.log;
+
+
+
+const corsOptions = {
+  origin: "*", // Allow all origins
+  methods: "GET,HEAD,PUT,PATCH,POST,DELETE", // Allow only GET, HEAD, PUT, PATCH, POST, and DELETE requests
+  credentials: true, // This allows cookies and credentials to be included in the requests
+};
+app.use(cors(corsOptions));
 
 // Command queue for device operations
 let deviceCommandQueue = new Map(); // Map to store commands for each device
