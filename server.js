@@ -6,7 +6,6 @@ const multer = require("multer");
 const fs = require("fs");
 const { randomUUID } = require("crypto");
 const sharp = require("sharp");
-const Database = require("./Keyvaluedb");
 
 // Initialize Express app
 const app = express();
@@ -39,10 +38,13 @@ const db = new sqlite3.Database(dbPath, (err) => {
     console.log("Connected to SQLite database.");
   }
 });
-const keydb = new Database({
-  root: "./",
-  maxDirs: 1e4,
-});
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS KeyValueStore (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )
+`);
 
 db.run(
   `CREATE TABLE IF NOT EXISTS users (
@@ -86,6 +88,34 @@ db.run(
     }
   }
 );
+
+function setKeyValue(key, value) {
+  const serializedValue = JSON.stringify(value); // Convert to JSON string
+  return new Promise((resolve, reject) => {
+    db.run(
+      `INSERT INTO KeyValueStore (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [key, serializedValue],
+      function (err) {
+        if (err) reject(err);
+        else resolve("Key-Value pair set successfully.");
+      }
+    );
+  });
+}
+
+function getValueByKey(key) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT value FROM KeyValueStore WHERE key = ?`,
+      [key],
+      (err, row) => {
+        if (err) reject(err);
+        else resolve(row ? JSON.parse(row.value) : null); // Convert back from JSON
+      }
+    );
+  });
+}
 
 const uploadDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadDir)) {
@@ -148,7 +178,7 @@ app.get("/users", async (req, res) => {
   });
 });
 
-app.get("/iclock/cdata", (req, res) => {
+app.get("/iclock/cdata", async (req, res) => {
   const now = new Date();
 
   try {
@@ -158,11 +188,20 @@ app.get("/iclock/cdata", (req, res) => {
     // console.log(req.query);
     // console.log(req.headers);
     const { SN } = req.query;
+
     if (!SN || typeof SN !== "string") {
       logger("SN query parameter missing or invalid");
       return res
         .status(400)
         .send("Bad Request: SN is required and must be a string");
+    }
+
+    console.log(SN);
+    const existsdevice = await getValueByKey(SN);
+    if (!existsdevice) {
+      setKeyValue(SN, {
+        commands: [],
+      });
     }
 
     // Create the response body (use \n for line breaks)
@@ -239,48 +278,89 @@ app.get("/users", (req, res) => {
   });
 });
 
-app.get("/iclock/getrequest", (req, res) => {
+app.get("/iclock/getrequest", async (req, res) => {
   logger("getrequest endpoint hit");
+  const { SN } = req.query;
+  console.log(SN);
 
   // Get next unexecuted command
-  db.get(
-    "SELECT id, command FROM commands WHERE executed = 0 ORDER BY created_at ASC LIMIT 1",
-    [],
-    (err, row) => {
-      if (err) {
-        console.error("Database error:", err);
-        return res.status(500).send("Error");
-      }
+  // db.get(
+  //   "SELECT id, command FROM commands WHERE executed = 0 ORDER BY created_at ASC LIMIT 1",
+  //   [],
+  //   (err, row) => {
+  //     if (err) {
+  //       console.error("Database error:", err);
+  //       return res.status(500).send("Error");
+  //     }
 
-      if (!row) {
-        // No more commands, send OK
-        return res.status(200).send("OK");
-      }
+  //     if (!row) {
+  //       // No more commands, send OK
+  //       return res.status(200).send("OK");
+  //     }
 
-      // Mark command as executed
-      db.run(
-        "UPDATE commands SET executed = 1 WHERE id = ?",
-        [row.id],
-        (updateErr) => {
-          if (updateErr) {
-            console.error("Error updating command status:", updateErr);
-          }
-        }
-      );
+  //     // Mark command as executed
+  //     db.run(
+  //       "UPDATE commands SET executed = 1 WHERE id = ?",
+  //       [row.id],
+  //       (updateErr) => {
+  //         if (updateErr) {
+  //           console.error("Error updating command status:", updateErr);
+  //         }
+  //       }
+  //     );
 
-      res.set({
-        "Content-Type": "text/plain",
-        Pragma: "no-cache",
-        Connection: "close",
-        "Cache-Control": "no-store",
-        Date: convertToGMT(new Date()),
-        Server: "nginx/1.6.0",
-      });
-      // console.log("This is command", row.command);
+  //     res.set({
+  //       "Content-Type": "text/plain",
+  //       Pragma: "no-cache",
+  //       Connection: "close",
+  //       "Cache-Control": "no-store",
+  //       Date: convertToGMT(new Date()),
+  //       Server: "nginx/1.6.0",
+  //     });
+  //     // console.log("This is command", row.command);
 
-      return res.status(200).send(row.command);
+  //     return res.status(200).send(row.command);
+  //   }
+  // );
+  const command = await getValueByKey("commands");
+  let commandtobeexecuted;
+  const currentDevice = await getValueByKey(SN);
+
+  if (
+    command &&
+    Array.isArray(command) &&
+    Array.isArray(currentDevice.commands)
+  ) {
+    // Deduplicate both command and currentDevice.commands
+    const uniqueCommands = [...new Set(command)];
+    const executedCommands = new Set(currentDevice.commands);
+
+    // Find commands that are not yet executed
+    const nonExecutedCommands = uniqueCommands.filter(
+      (cmd) => !executedCommands.has(cmd)
+    );
+
+    if (nonExecutedCommands.length > 0) {
+      commandtobeexecuted = nonExecutedCommands[0];
+
+      // Update currentDevice.commands with unique values only
+      const updatedCommands = [
+        ...new Set([...currentDevice.commands, commandtobeexecuted]),
+      ];
+      await setKeyValue(SN, { commands: updatedCommands });
     }
-  );
+  }
+  // console.log(commandtobeexecuted);
+
+  res.set({
+    "Content-Type": "text/plain",
+    Pragma: "no-cache",
+    Connection: "close",
+    "Cache-Control": "no-store",
+    Date: convertToGMT(new Date()),
+    Server: "nginx/1.6.0",
+  });
+  return res.status(200).send(commandtobeexecuted);
 });
 
 // POST endpoint for iclock/cdata
@@ -406,23 +486,23 @@ app.post("/api/register-user", upload.single("photo"), async (req, res) => {
     fs.unlinkSync(optimizedPhotoPath);
 
     const commands = [
-      `C:223123:DATA USER PIN=1\tName=${name}`,
-      `C:333123:DATA UPDATE BIOPHOTO PIN=1\tFID=1\tNo=0\tIndex=0\tType=2\tFormat=0\tSize=${photoBuffer.length}\tContent=${photoBase64}`,
+      `C:223123:DATA USER PIN=${userPin}\tName=${name}`,
+      `C:333123:DATA UPDATE BIOPHOTO PIN=${userPin}\tFID=1\tNo=0\tIndex=0\tType=2\tFormat=0\tSize=${photoBuffer.length}\tContent=${photoBase64}`,
       // `C:213:CLEAR DATA `,
     ];
 
-    storeCommands(commands, (err, ids) => {
-      if (err) {
-        return res
-          .status(500)
-          .json({ message: "Error inserting commands", error: err });
-      }
+    const allcommands = await getValueByKey("commands");
+    console.log("This is allcommands", allcommands);
 
-      res.status(200).json({
-        message: "Commands queued successfully",
-        commands: commands.length,
-        ids: ids, // Return all inserted IDs
-      });
+    if (!allcommands) {
+      setKeyValue("commands", commands);
+    } else {
+      setKeyValue("commands", [...allcommands, ...commands]);
+    }
+    res.status(200).json({
+      message: "Commands queued successfully",
+      commands: commands.length,
+      // ids: ids, // Return all inserted IDs
     });
   } catch (error) {
     console.error("Error processing registration:", error);
