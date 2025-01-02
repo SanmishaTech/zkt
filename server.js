@@ -12,15 +12,12 @@ const cors = require("cors");
 const app = express();
 let logger = console.log;
 
-
-
 const corsOptions = {
   origin: "*", // Allow all origins
   methods: "GET,HEAD,PUT,PATCH,POST,DELETE", // Allow only GET, HEAD, PUT, PATCH, POST, and DELETE requests
   credentials: true, // This allows cookies and credentials to be included in the requests
 };
 app.use(cors(corsOptions));
-
 // Command queue for device operations
 let deviceCommandQueue = new Map(); // Map to store commands for each device
 let currentCommandIndex = new Map(); // Track current command index for each device
@@ -52,7 +49,9 @@ const db = new sqlite3.Database(dbPath, (err) => {
 db.run(`
   CREATE TABLE IF NOT EXISTS KeyValueStore (
     key TEXT PRIMARY KEY,
-    value TEXT
+    value TEXT,
+    userpin integer,
+    date_created TEXT DEFAULT (datetime('now'))
   )
 `);
 
@@ -99,13 +98,29 @@ db.run(
   }
 );
 
-function setKeyValue(key, value) {
+function deleteOldRecords() {
+  const today = new Date().toISOString().split("T")[0];
+  db.run(
+    `DELETE FROM KeyValueStore WHERE date_created < ?`,
+    [today],
+    function (err) {
+      if (err) {
+        console.error("Error deleting old records:", err.message);
+      } else {
+        console.log(`${this.changes} old records deleted.`);
+      }
+    }
+  );
+}
+
+function setKeyValue(key, value, userpin) {
+  console.log("This is userpin storing", userpin);
   const serializedValue = JSON.stringify(value); // Convert to JSON string
   return new Promise((resolve, reject) => {
     db.run(
-      `INSERT INTO KeyValueStore (key, value) VALUES (?, ?)
+      `INSERT INTO KeyValueStore (key, value,userpin) VALUES (?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      [key, serializedValue],
+      [key, serializedValue, userpin],
       function (err) {
         if (err) reject(err);
         else resolve("Key-Value pair set successfully.");
@@ -119,6 +134,19 @@ function getValueByKey(key) {
     db.get(
       `SELECT value FROM KeyValueStore WHERE key = ?`,
       [key],
+      (err, row) => {
+        if (err) reject(err);
+        else resolve(row ? JSON.parse(row.value) : null); // Convert back from JSON
+      }
+    );
+  });
+}
+function getValueByUserpin(userpin) {
+  console.log("This is userpin", userpin);
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT * FROM KeyValueStore WHERE userpin = ?`,
+      [userpin],
       (err, row) => {
         if (err) reject(err);
         else resolve(row ? JSON.parse(row.value) : null); // Convert back from JSON
@@ -175,21 +203,19 @@ app.post("/users", upload.single("photo"), (req, res) => {
 
 // Route to fetch all users
 app.get("/users", async (req, res) => {
-  deviceCommandQueue["123"] = "123";
-  console.log(deviceCommandQueue);
-
-  const query = `SELECT * FROM users`;
-  db.all(query, [], (err, rows) => {
+  // get all values for keyvaluestore
+  db.all(`SELECT * FROM KeyValueStore`, (err, rows) => {
     if (err) {
-      res.status(400).json({ error: err.message });
-    } else {
-      res.status(200).json(rows);
+      console.error("Error fetching key-value store:", err.message);
+      return;
     }
+    return res.status(200).json(rows);
   });
 });
 
 app.get("/iclock/cdata", async (req, res) => {
   const now = new Date();
+  deleteOldRecords();
 
   try {
     logger("cdata endpoint hit");
@@ -242,27 +268,6 @@ app.get("/iclock/cdata", async (req, res) => {
   }
 });
 
-function storeCommands(commands, callback) {
-  const stmt = db.prepare("INSERT INTO commands (command) VALUES (?)");
-  const ids = [];
-
-  for (const cmd of commands) {
-    stmt.run([cmd], function (err) {
-      if (err) {
-        console.error("Error inserting command:", err);
-        callback(err, null);
-        return;
-      }
-      ids.push(this.lastID); // Collect the ID of the inserted command
-
-      // Check if all commands have been processed
-      if (ids.length === commands.length) {
-        callback(null, ids);
-      }
-    });
-  }
-  stmt.finalize();
-}
 app.get("/command/:id", (req, res) => {
   const { id } = req.params;
   db.get("SELECT * FROM commands WHERE id = ?", [id], (err, row) => {
@@ -293,48 +298,11 @@ app.get("/iclock/getrequest", async (req, res) => {
   const { SN } = req.query;
   console.log(SN);
 
-  // Get next unexecuted command
-  // db.get(
-  //   "SELECT id, command FROM commands WHERE executed = 0 ORDER BY created_at ASC LIMIT 1",
-  //   [],
-  //   (err, row) => {
-  //     if (err) {
-  //       console.error("Database error:", err);
-  //       return res.status(500).send("Error");
-  //     }
-
-  //     if (!row) {
-  //       // No more commands, send OK
-  //       return res.status(200).send("OK");
-  //     }
-
-  //     // Mark command as executed
-  //     db.run(
-  //       "UPDATE commands SET executed = 1 WHERE id = ?",
-  //       [row.id],
-  //       (updateErr) => {
-  //         if (updateErr) {
-  //           console.error("Error updating command status:", updateErr);
-  //         }
-  //       }
-  //     );
-
-  //     res.set({
-  //       "Content-Type": "text/plain",
-  //       Pragma: "no-cache",
-  //       Connection: "close",
-  //       "Cache-Control": "no-store",
-  //       Date: convertToGMT(new Date()),
-  //       Server: "nginx/1.6.0",
-  //     });
-  //     // console.log("This is command", row.command);
-
-  //     return res.status(200).send(row.command);
-  //   }
-  // );
   const command = await getValueByKey("commands");
   let commandtobeexecuted;
   const currentDevice = await getValueByKey(SN);
+
+  console.log("This is a ");
 
   if (
     command &&
@@ -352,12 +320,19 @@ app.get("/iclock/getrequest", async (req, res) => {
 
     if (nonExecutedCommands.length > 0) {
       commandtobeexecuted = nonExecutedCommands[0];
+      const pinStartIndex = commandtobeexecuted.indexOf("PIN=") + 4; // 4 is the length of "PIN="
+      const pinEndIndex = commandtobeexecuted.indexOf("\t", pinStartIndex); // Assuming \t is the delimiter after PIN
+      const userPin = commandtobeexecuted.slice(
+        pinStartIndex,
+        pinEndIndex !== -1 ? pinEndIndex : undefined
+      );
+      console.log("This is userPin in getrequst", userPin);
 
       // Update currentDevice.commands with unique values only
       const updatedCommands = [
         ...new Set([...currentDevice.commands, commandtobeexecuted]),
       ];
-      await setKeyValue(SN, { commands: updatedCommands });
+      await setKeyValue(SN, { commands: updatedCommands }, userPin);
     }
   }
   // console.log(commandtobeexecuted);
@@ -428,26 +403,73 @@ app.post("/iclock/devicecmd", async (req, res) => {
   }
 });
 
+// Add these functions after your existing setKeyValue and getValueByKey functions
+
+async function addCommandWithDate(command) {
+  const today = new Date().toISOString().split("T")[0];
+
+  try {
+    const existingData = (await getValueByKey("commands")) || {};
+
+    // Initialize or get today's commands
+    if (!existingData[today]) {
+      existingData[today] = [];
+    }
+
+    // Add new command(s)
+    if (Array.isArray(command)) {
+      existingData[today].push(...command);
+    } else {
+      existingData[today].push(command);
+    }
+
+    // Clean up old dates
+    const dates = Object.keys(existingData);
+    dates.forEach((date) => {
+      if (date < today) {
+        delete existingData[date];
+      }
+    });
+
+    await setKeyValue("commands", existingData);
+    return existingData;
+  } catch (error) {
+    console.error("Error adding command with date:", error);
+    throw error;
+  }
+}
+
+async function getCommandsForToday() {
+  const today = new Date().toISOString().split("T")[0];
+
+  try {
+    const allCommands = (await getValueByKey("commands")) || {};
+    return allCommands[today] || [];
+  } catch (error) {
+    console.error("Error getting today's commands:", error);
+    throw error;
+  }
+}
+
+const encodeBase64 = (base64String) => {
+  // Replace newlines and whitespace
+  const sanitizedString = base64String.replace(/\s+/g, "");
+
+  // Convert to Buffer
+  const buffer = Buffer.from(sanitizedString, "base64");
+
+  // Encode into Base64 URL-safe format
+  const encodedString = buffer.toString("base64");
+
+  return encodedString;
+};
+
 app.post("/api/delete-user/:id", async (req, res) => {
   const { id } = req.params;
 
   try {
     const commands = [`c:122:DATA DELETE USER PIN=${id}`];
 
-    storeCommands(commands, (err, ids) => {
-      if (err) {
-        return res
-          .status(500)
-          .json({ message: "Error inserting commands", error: err });
-      }
-
-      res.status(200).json({
-        message: "User Deleted Successfully",
-        commands: commands.length,
-        databaseId: ids, // Return all inserted IDs
-        UserId: id,
-      });
-    });
     // const query = `DELETE FROM users WHERE id = ?`;
     // db.run(query, [id], (err) => {
     //   if (err) {
@@ -465,13 +487,82 @@ app.post("/api/delete-user/:id", async (req, res) => {
 
 // API to queue new user registration with face
 app.post("/api/register-user", upload.single("photo"), async (req, res) => {
-  const { name, userPin } = req.body;
+  const { name, userPin, base64 } = req.body;
 
-  if (!req.file || !name || !userPin) {
+  if (!name || !userPin) {
     return res.status(400).json({ error: "Missing required fields" });
+  }
+  //if user already exists in our database we return with duplicate user message
+  const useruser = await getValueByUserpin(userPin);
+  console.log("This is useruser", useruser);
+  if (useruser) {
+    return res.status(400).json({ error: "User already exists" });
   }
 
   try {
+    if (base64) {
+      // const base64new = encodeBase64(base64);
+      // console.log("This is base64new", base64new);
+
+      // Example base64 data handling
+      const matches = base64.match(/^data:(.+);base64,(.+)$/);
+      if (!matches) {
+        return res.status(400).json({ message: "Invalid Base64 format." });
+      }
+
+      const mimeType = matches[1];
+      const base64Data = matches[2];
+
+      // Convert to Buffer
+      const fileBuffer = Buffer.from(base64Data, "base64");
+
+      // Define upload directory and file paths
+      const uploadDir = path.join(__dirname, "uploads");
+      const fileName = `file-${Date.now()}.${mimeType.split("/")[1]}`; // Generate a unique file name
+      const filePath = path.join(uploadDir, fileName);
+
+      // Ensure 'uploads' directory exists
+      fs.mkdirSync(uploadDir, { recursive: true }); // Ensure directory structure is present
+
+      // Write the file
+      fs.writeFileSync(filePath, fileBuffer);
+
+      // Optimize the photo using Sharp
+      const optimizedPhotoPath = path.join(uploadDir, `optimized-${fileName}`);
+      await sharp(filePath)
+        .resize(300, 300)
+        .toFormat("jpg") // Explicitly set output format to JPEG
+        .jpeg({
+          quality: 70,
+          chromaSubsampling: "4:4:4", // Maintain color quality
+        })
+        .toFile(optimizedPhotoPath);
+
+      // Convert optimized photo to Base64
+      const photoBuffer = fs.readFileSync(optimizedPhotoPath);
+      const photoBase64 = photoBuffer.toString("base64");
+
+      fs.unlinkSync(filePath); // Delete the original uploaded file
+      fs.unlinkSync(optimizedPhotoPath); // Delete the optimized file
+      const commands = [
+        `C:223123:DATA USER PIN=${userPin}\tName=${name}`,
+        `C:333123:DATA UPDATE BIOPHOTO PIN=${userPin}\tFID=1\tNo=0\tIndex=0\tType=2\tFormat=0\tSize=${photoBase64.length}}}\tContent=${photoBase64}`,
+        // `C:213:CLEAR DATA `,
+      ];
+      const allcommands = await getValueByKey("commands");
+
+      if (!allcommands) {
+        setKeyValue("commands", commands);
+      } else {
+        setKeyValue("commands", [...allcommands, ...commands]);
+      }
+      return res.status(200).json({
+        message: "Commands queued successfully",
+        commands: commands.length,
+        // ids: ids, // Return all inserted IDs
+      });
+    }
+
     // Process and optimize the photo using sharp with JPG format
     const optimizedPhotoPath = path.join(
       uploadDir,
@@ -490,6 +581,8 @@ app.post("/api/register-user", upload.single("photo"), async (req, res) => {
     const photoBuffer = fs.readFileSync(optimizedPhotoPath);
     const photoBase64 = photoBuffer.toString("base64");
 
+    console.log("This is photoBase64", photoBase64);
+
     // Clean up both original and optimized uploaded files
 
     fs.unlinkSync(req.file.path);
@@ -502,7 +595,6 @@ app.post("/api/register-user", upload.single("photo"), async (req, res) => {
     ];
 
     const allcommands = await getValueByKey("commands");
-    console.log("This is allcommands", allcommands);
 
     if (!allcommands) {
       setKeyValue("commands", commands);
