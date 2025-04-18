@@ -18,18 +18,15 @@ A Node.js server that manages communication with ZKTeco biometric devices for us
 
 1. Clone the repository
 2. Install dependencies:
+
 ```sh
 npm install
 ```
 
 ## Project Setup
 
-1. Create required directories:
-```sh
-mkdir uploads
-```
+1. The server will automatically:
 
-2. The server will automatically:
 - Create SQLite database file (database.sqlite)
 - Initialize required tables
 - Set up upload directory for temporary files
@@ -37,6 +34,7 @@ mkdir uploads
 ## Required Database Tables
 
 The server automatically creates these tables:
+
 - KeyValueStore: Stores device commands and user data
 - Users: Stores user information
 - Commands: Stores pending device commands
@@ -53,12 +51,14 @@ The server will start on port 3000 by default.
 ## API Endpoints
 
 ### Device Communication
+
 - `GET /iclock/cdata` - Device initialization and options
 - `POST /iclock/cdata` - Process device data
 - `GET /iclock/getrequest` - Handle command queue requests
 - `POST /iclock/devicecmd` - Process command results
 
 ### User Management
+
 - `POST /api/register-user` - Register new user with face photo
   - Required fields: name, userPin
   - Optional: photo (file) or base64 (string)
@@ -66,6 +66,7 @@ The server will start on port 3000 by default.
 - `GET /users` - Get all users
 
 ### Command Management
+
 - `POST /api/add-command` - Add new command
 - `GET /command/:id` - Get command status
 
