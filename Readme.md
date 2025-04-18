@@ -2,43 +2,99 @@
 
 A Node.js server that manages communication with ZKTeco biometric devices for user registration and face recognition.
 
+## System Requirements
+
+- Node.js v18 or higher
+- Linux/Ubuntu system packages:
+  ```sh
+  sudo apt-get update
+  sudo apt-get install -y python build-essential node-gyp sqlite3 libsqlite3-dev
+  ```
+
 ## Prerequisites
 
-- Node.js v14 or higher
+- Node.js v18.20.4 or higher
 - NPM package manager
+- Required system libraries for SQLite3
 - The following npm packages:
-  - express
-  - moment
-  - sqlite3
-  - multer
-  - sharp
-  - cors
+  - express: ^4.18.2
+  - moment: ^2.30.1
+  - sqlite3: ^5.1.7
+  - multer: ^1.4.5-lts.1
+  - sharp: ^0.32.6
+  - cors: ^2.8.5
 
 ## Installation
 
-1. Clone the repository
-2. Install dependencies:
+1. Clone the repository:
+
+```sh
+git clone <repository-url>
+cd zkteco
+```
+
+2. Install system dependencies:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y python build-essential node-gyp sqlite3 libsqlite3-dev
+```
+
+3. Install Node.js dependencies:
 
 ```sh
 npm install
 ```
 
+If you encounter SQLite3 issues:
+
+```sh
+# Clean existing installations
+rm -rf node_modules package-lock.json
+npm cache clean --force
+
+# Rebuild SQLite3
+npm install sqlite3 --build-from-source
+```
+
 ## Project Setup
 
-1. The server will automatically:
+The server will automatically:
 
 - Create SQLite database file (database.sqlite)
 - Initialize required tables
 - Set up upload directory for temporary files
 
-## Required Database Tables
+## Database Schema
 
 The server automatically creates these tables:
 
-- KeyValueStore: Stores device commands and user data
-- Users: Stores user information
-- Commands: Stores pending device commands
-- Devices: Stores device information
+- **KeyValueStore**:
+
+  - key (TEXT PRIMARY KEY)
+  - value (TEXT)
+  - userpin (INTEGER)
+  - date_created (TEXT)
+
+- **Users**:
+
+  - id (INTEGER PRIMARY KEY)
+  - name (TEXT)
+  - email (TEXT UNIQUE)
+  - photo (TEXT)
+
+- **Commands**:
+
+  - id (INTEGER PRIMARY KEY)
+  - command (TEXT)
+  - executed (BOOLEAN)
+  - created_at (DATETIME)
+
+- **Devices**:
+  - id (INTEGER PRIMARY KEY)
+  - command (TEXT)
+  - executed (BOOLEAN)
+  - created_at (DATETIME)
 
 ## Running the Server
 
@@ -70,10 +126,39 @@ The server will start on port 3000 by default.
 - `POST /api/add-command` - Add new command
 - `GET /command/:id` - Get command status
 
-## Notes
+## Technical Notes
 
-- Photo uploads are automatically optimized using Sharp
-- Face photos are resized to 300x300 pixels
-- All uploads are temporarily stored and automatically cleaned up
-- The server implements a command queue system for device operations
-- CORS is enabled for all origins by default
+- Photo Processing:
+
+  - Uploads are automatically optimized using Sharp
+  - Face photos are resized to 300x300 pixels
+  - JPG format with 70% quality and 4:4:4 chroma subsampling
+  - Temporary files are automatically cleaned up
+
+- Security:
+
+  - CORS is enabled for all origins by default
+  - Supports credentials in requests
+  - Allows GET, HEAD, PUT, PATCH, POST, and DELETE methods
+
+- Data Management:
+  - Implements command queue system for device operations
+  - Automatic cleanup of old records
+  - Base64 encoding for photo storage
+
+## Error Handling
+
+If you encounter SQLite3 related errors:
+
+1. Ensure all system dependencies are installed
+2. Try rebuilding the SQLite3 module
+3. Check database file permissions
+4. Verify Node.js version compatibility
+
+## Development
+
+For development with auto-reload:
+
+```sh
+npm run dev
+```
